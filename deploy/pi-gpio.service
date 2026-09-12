@@ -1,0 +1,17 @@
+[Unit]
+Description=Raspberry Pi Next.js GPIO Web Controller
+After=network.target
+
+[Service]
+Type=simple
+User=mrceoxyz
+WorkingDirectory=/home/mrceoxyz/sandbox/pi-gpio-controller
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOSTNAME=0.0.0.0
+ExecStart=/usr/bin/pnpm start
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
