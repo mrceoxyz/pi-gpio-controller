@@ -18,10 +18,12 @@ class AutomationEngine {
   private relayOffTimeout: NodeJS.Timeout | null = null;
   private motorOffTimeout: NodeJS.Timeout | null = null;
   private prevButtonState: boolean = false;
+  private pollingInterval: NodeJS.Timeout | null = null;
 
   constructor() {
     this.initRules();
     this.addLog("automation", "System Boot", "Automation Hub Engine initialized");
+    this.startHardwarePolling();
   }
 
   private initRules() {
@@ -31,6 +33,16 @@ class AutomationEngine {
       description: "Turns on Relay (Lamp) for 30s when motion is detected in the dark",
       enabled: true,
       icon: "moon",
+      triggerCount: 0,
+      lastTriggered: null,
+    });
+
+    this.rules.set("dusk-dawn", {
+      id: "dusk-dawn",
+      name: "Dusk-to-Dawn Auto Switch",
+      description: "Turns Relay (Lamp) ON whenever Dark, and turns it OFF when Bright (Streetlight mode)",
+      enabled: false,
+      icon: "sun-dim",
       triggerCount: 0,
       lastTriggered: null,
     });
@@ -64,6 +76,46 @@ class AutomationEngine {
       triggerCount: 0,
       lastTriggered: null,
     });
+  }
+
+  // Active hardware reading loop on real Raspberry Pi
+  private startHardwareHardwareTicker() {
+    if (this.pollingInterval) return;
+
+    this.pollingInterval = setInterval(async () => {
+      try {
+        const stats = gpio.getSystemStats();
+        if (!stats.isPi) return;
+
+        // 1. Light Sensor (Pin 15 / BCM 22)
+        // Most digital LDR modules output HIGH (1) for dark, or LOW (0) when light reaches threshold
+        const rawLight = await gpio.readPinState(15);
+        const isDark = rawLight === 1;
+        if (isDark !== this.sensorState.isDark) {
+          await this.updateSensor("light", isDark);
+        }
+
+        // 2. PIR Motion Sensor (Pin 18 / BCM 24)
+        const rawPir = await gpio.readPinState(18);
+        const pirMotion = rawPir === 1;
+        if (pirMotion !== this.sensorState.pirMotion) {
+          await this.updateSensor("pir", pirMotion);
+        }
+
+        // 3. Push Button (Pin 16 / BCM 23 with pull-up: 0 = pressed, 1 = idle)
+        const rawBtn = await gpio.readPinState(16);
+        const buttonPressed = rawBtn === 0;
+        if (buttonPressed !== this.sensorState.buttonPressed) {
+          await this.updateSensor("button", buttonPressed);
+        }
+      } catch {
+        // Continue loop
+      }
+    }, 250);
+  }
+
+  private startHardwarePolling() {
+    this.startHardwareHardwareTicker();
   }
 
   public getRules(): AutomationRule[] {
@@ -166,13 +218,18 @@ class AutomationEngine {
         gpio.setSimulationInputState(18, 0);
       }
     } else if (sensor === "light") {
+      const changed = this.sensorState.isDark !== value;
       this.sensorState.isDark = value;
       gpio.setSimulationInputState(15, value ? 1 : 0);
-      this.addLog(
-        "automation",
-        "Light Level Changed",
-        `Ambient sensor detected ${value ? "DARKNESS / NIGHT" : "BRIGHT LIGHT / DAY"}`
-      );
+
+      if (changed) {
+        this.addLog(
+          "automation",
+          "Light Level Changed",
+          `Ambient sensor detected ${value ? "DARKNESS / NIGHT" : "BRIGHT LIGHT / DAY"}`
+        );
+        await this.evaluateLightRules(value);
+      }
     } else if (sensor === "button") {
       const isPressEvent = !this.prevButtonState && value;
       this.sensorState.buttonPressed = value;
@@ -183,6 +240,30 @@ class AutomationEngine {
         this.sensorState.lastButtonTimestamp = now;
         this.addLog("manual", "Button Pressed", "Physical wall switch button tapped");
         await this.evaluateButtonRules();
+      }
+    }
+  }
+
+  private async evaluateLightRules(isDark: boolean): Promise<void> {
+    const duskDawnRule = this.rules.get("dusk-dawn");
+    if (duskDawnRule && duskDawnRule.enabled) {
+      duskDawnRule.triggerCount++;
+      duskDawnRule.lastTriggered = new Date().toLocaleTimeString();
+
+      if (isDark) {
+        await gpio.setPinState(11, 1);
+        this.addLog(
+          "automation",
+          "Dusk Auto-Light ON",
+          "Relay (Lamp) turned ON automatically (Darkness detected)"
+        );
+      } else {
+        await gpio.setPinState(11, 0);
+        this.addLog(
+          "automation",
+          "Dawn Auto-Light OFF",
+          "Relay (Lamp) turned OFF automatically (Daylight restored)"
+        );
       }
     }
   }
@@ -250,7 +331,6 @@ class AutomationEngine {
       buttonRule.triggerCount++;
       buttonRule.lastTriggered = new Date().toLocaleTimeString();
 
-      // Clear any pending auto-off timer when manually toggled
       if (this.relayOffTimeout) {
         clearTimeout(this.relayOffTimeout);
         this.relayOffTimeout = null;
