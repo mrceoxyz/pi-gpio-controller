@@ -3,21 +3,49 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { Navbar } from "@/components/Navbar";
 import { SystemTelemetry } from "@/components/SystemTelemetry";
+import { SensorsPanel } from "@/components/SensorsPanel";
+import { ActuatorsPanel } from "@/components/ActuatorsPanel";
+import { AutomationRulesCard } from "@/components/AutomationRulesCard";
+import { ActivityLog } from "@/components/ActivityLog";
+import { WiringGuideModal } from "@/components/WiringGuideModal";
 import { QuickActions } from "@/components/QuickActions";
 import { PinCard } from "@/components/PinCard";
 import { PinHeaderDiagram } from "@/components/PinHeaderDiagram";
-import { GpioPin, SystemStats } from "@/lib/types";
-import { LayoutGrid, Binary, HelpCircle, CheckCircle, AlertCircle } from "lucide-react";
+import {
+  GpioPin,
+  SystemStats,
+  AutomationRule,
+  SecurityMode,
+  SensorState,
+  ActivityLogEvent,
+} from "@/lib/types";
+import { Home, Binary, CheckCircle, AlertCircle, Sparkles } from "lucide-react";
 
 export default function Dashboard() {
   const [pins, setPins] = useState<GpioPin[]>([]);
   const [stats, setStats] = useState<SystemStats | null>(null);
+  const [rules, setRules] = useState<AutomationRule[]>([]);
+  const [securityMode, setSecurityMode] = useState<SecurityMode>("disarmed");
+  const [securityAlarm, setSecurityAlarm] = useState(false);
+  const [sensors, setSensors] = useState<SensorState>({
+    pirMotion: false,
+    isDark: true,
+    buttonPressed: false,
+    lastMotionTimestamp: null,
+    lastButtonTimestamp: null,
+  });
+  const [logs, setLogs] = useState<ActivityLogEvent[]>([]);
+
   const [isLoading, setIsLoading] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [activeTab, setActiveTab] = useState<"cards" | "header" | "split">("split");
+  const [activeTab, setActiveTab] = useState<"hub" | "pins">("hub");
+  const [isWiringModalOpen, setIsWiringModalOpen] = useState(false);
+
+  // Pin view filtering
   const [filter, setFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
+
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   const showToast = (message: string, type: "success" | "error" = "success") => {
@@ -25,18 +53,32 @@ export default function Dashboard() {
     setTimeout(() => setToast(null), 3500);
   };
 
-  // Fetch pin states & system stats
+  // Fetch GPIO & Automation data
   const fetchData = useCallback(async (silent = false) => {
     if (!silent) setIsLoading(true);
     try {
-      const res = await fetch("/api/gpio", { cache: "no-store" });
-      const data = await res.json();
-      if (data.success) {
-        setPins(data.pins);
-        setStats(data.stats);
+      const [gpioRes, autoRes] = await Promise.all([
+        fetch("/api/gpio", { cache: "no-store" }),
+        fetch("/api/automation", { cache: "no-store" }),
+      ]);
+
+      const gpioData = await gpioRes.json();
+      const autoData = await autoRes.json();
+
+      if (gpioData.success) {
+        setPins(gpioData.pins);
+        setStats(gpioData.stats);
+      }
+
+      if (autoData.success) {
+        setRules(autoData.rules);
+        setSecurityMode(autoData.securityMode);
+        setSecurityAlarm(autoData.securityAlarmTriggered);
+        setSensors(autoData.sensors);
+        setLogs(autoData.logs);
       }
     } catch (err) {
-      console.error("Error fetching GPIO state:", err);
+      console.error("Error fetching state:", err);
     } finally {
       if (!silent) setIsLoading(false);
     }
@@ -51,13 +93,12 @@ export default function Dashboard() {
     if (!autoRefresh) return;
     const timer = setInterval(() => {
       fetchData(true);
-    }, 2500);
+    }, 2000);
     return () => clearInterval(timer);
   }, [autoRefresh, fetchData]);
 
   // Toggle single pin
   const handleToggle = async (id: number) => {
-    // Optimistic UI update
     setPins((prev) =>
       prev.map((p) => (p.id === id ? { ...p, state: p.state === 1 ? 0 : 1 } : p))
     );
@@ -72,6 +113,7 @@ export default function Dashboard() {
       if (data.success) {
         setPins((prev) => prev.map((p) => (p.id === id ? data.pin : p)));
         setStats(data.stats);
+        fetchData(true);
       } else {
         fetchData(true);
         showToast(data.error || "Failed to toggle pin", "error");
@@ -82,7 +124,116 @@ export default function Dashboard() {
     }
   };
 
-  // Pulse / blink pin
+  // Motor Action Presets
+  const handleTriggerMotorAction = async (action: "feed-pulse" | "cool-run") => {
+    try {
+      const res = await fetch("/api/motor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        fetchData(true);
+        showToast(data.message || "Motor action started!");
+      }
+    } catch {
+      showToast("Failed to run motor preset", "error");
+    }
+  };
+
+  // Simulate Sensor Input (from UI)
+  const handleSimulateSensor = async (
+    sensor: "pir" | "light" | "button",
+    value: boolean
+  ) => {
+    try {
+      const res = await fetch("/api/automation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "simulate-sensor", sensor, value }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSensors(data.sensors);
+        if (data.pins) setPins(data.pins);
+        fetchData(true);
+      }
+    } catch {
+      showToast("Failed to simulate sensor", "error");
+    }
+  };
+
+  // Toggle Rule
+  const handleToggleRule = async (ruleId: string, enabled?: boolean) => {
+    try {
+      const res = await fetch("/api/automation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "toggle-rule", ruleId, enabled }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setRules((prev) => prev.map((r) => (r.id === ruleId ? data.rule : r)));
+        showToast(`Rule updated`);
+        fetchData(true);
+      }
+    } catch {
+      showToast("Failed to update rule", "error");
+    }
+  };
+
+  // Set Security Mode
+  const handleSetSecurityMode = async (mode: SecurityMode) => {
+    try {
+      const res = await fetch("/api/automation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "set-security", mode }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSecurityMode(data.securityMode);
+        showToast(`Security mode set to ${mode.toUpperCase()}`);
+        fetchData(true);
+      }
+    } catch {
+      showToast("Failed to change security mode", "error");
+    }
+  };
+
+  // Clear Alarm
+  const handleClearAlarm = async () => {
+    try {
+      await fetch("/api/automation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "clear-alarm" }),
+      });
+      setSecurityAlarm(false);
+      showToast("Intruder alarm acknowledged and cleared");
+      fetchData(true);
+    } catch {
+      showToast("Failed to clear alarm", "error");
+    }
+  };
+
+  // Clear Logs
+  const handleClearLogs = async () => {
+    try {
+      await fetch("/api/automation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "clear-logs" }),
+      });
+      setLogs([]);
+      showToast("Activity log cleared");
+    } catch {
+      showToast("Failed to clear logs", "error");
+    }
+  };
+
+  // Pulse Pin
   const handlePulse = async (id: number, durationMs = 400, times = 2) => {
     try {
       const res = await fetch("/api/gpio/pulse", {
@@ -93,16 +244,14 @@ export default function Dashboard() {
       const data = await res.json();
       if (data.success) {
         fetchData(true);
-        showToast(`Pulsed Pin ${id} successfully!`);
-      } else {
-        showToast(data.error || "Pulse failed", "error");
+        showToast(`Pulsed Pin ${id}`);
       }
     } catch {
-      showToast("Network error during pulse", "error");
+      showToast("Failed to pulse pin", "error");
     }
   };
 
-  // Rename pin
+  // Rename Pin
   const handleRename = async (id: number, newName: string) => {
     try {
       const res = await fetch("/api/gpio", {
@@ -120,14 +269,9 @@ export default function Dashboard() {
     }
   };
 
-  // Set All pins state (Bulk)
+  // Master Bulk
   const handleSetAll = async (state: 0 | 1) => {
     setIsProcessing(true);
-    // Optimistic
-    setPins((prev) =>
-      prev.map((p) => (p.isControllable && p.mode === "OUT" ? { ...p, state } : p))
-    );
-
     try {
       const res = await fetch("/api/gpio", {
         method: "POST",
@@ -138,21 +282,19 @@ export default function Dashboard() {
       if (data.success) {
         setPins(data.pins);
         setStats(data.stats);
-        showToast(`All pins turned ${state === 1 ? "ON" : "OFF"}`);
+        showToast(`All output pins turned ${state === 1 ? "ON" : "OFF"}`);
       }
     } catch {
-      fetchData(true);
-      showToast("Failed to update all pins", "error");
+      showToast("Failed to set all pins", "error");
     } finally {
       setIsProcessing(false);
     }
   };
 
-  // Fun sequence chaser
+  // Chaser sequence
   const handleChaserSequence = async () => {
     const controllablePins = pins.filter((p) => p.isControllable);
-    showToast("Starting chaser animation sequence...");
-
+    showToast("Starting chaser animation...");
     for (const pin of controllablePins) {
       await handleToggle(pin.id);
       await new Promise((r) => setTimeout(r, 120));
@@ -161,11 +303,13 @@ export default function Dashboard() {
     showToast("Sequence completed!");
   };
 
-  // Filtered controllable pins for card view
+  // Target pins for Hub
+  const relayPin = pins.find((p) => p.id === 11);
+  const motorPin = pins.find((p) => p.id === 13);
+
+  // Filtered pins for Header/Cards view
   const filteredPins = pins.filter((p) => {
     if (!p.isControllable) return false;
-
-    // Search query
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       const matchName = p.name.toLowerCase().includes(q);
@@ -173,13 +317,8 @@ export default function Dashboard() {
       const matchBcm = p.bcm.toString().includes(q);
       if (!matchName && !matchPin && !matchBcm) return false;
     }
-
-    // Category filter
     if (filter === "active") return p.state === 1;
-    if (filter === "presets") {
-      // Show highlighted pins (e.g. 11, 13, 15, 18, 12)
-      return [11, 13, 15, 18, 12, 16, 22].includes(p.id);
-    }
+    if (filter === "presets") return [11, 13, 15, 16, 18].includes(p.id);
     return true;
   });
 
@@ -191,116 +330,121 @@ export default function Dashboard() {
         isLoading={isLoading}
         autoRefresh={autoRefresh}
         setAutoRefresh={setAutoRefresh}
+        onOpenWiringGuide={() => setIsWiringModalOpen(true)}
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {/* System Telemetry Row */}
+        {/* System Telemetry Bar */}
         <SystemTelemetry stats={stats} />
 
-        {/* Action Bar & Filtering */}
-        <QuickActions
-          onSetAll={handleSetAll}
-          onRunSequence={handleChaserSequence}
-          isProcessing={isProcessing}
-          filter={filter}
-          setFilter={setFilter}
-          searchQuery={searchQuery}
-          setSearchQuery={setSearchQuery}
-        />
-
-        {/* View Mode Tabs (Cards / Header / Split) */}
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-base font-semibold text-slate-200">
-            {activeTab === "header"
-              ? "Pin Header Visualizer"
-              : activeTab === "cards"
-              ? "Controllable Outputs"
-              : "Dashboard Overview"}
-          </h2>
-
-          <div className="flex items-center bg-slate-900 p-1 rounded-xl border border-slate-800 text-xs">
+        {/* View Switcher Tabs */}
+        <div className="flex items-center justify-between mb-5">
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => setActiveTab("split")}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition-all ${
-                activeTab === "split" ? "bg-slate-800 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
+              onClick={() => setActiveTab("hub")}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+                activeTab === "hub"
+                  ? "bg-rose-600 text-white shadow-lg shadow-rose-600/30"
+                  : "bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800"
               }`}
             >
-              <LayoutGrid className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Split View</span>
+              <Home className="w-4 h-4" />
+              <span>Smart Home Automation Hub</span>
             </button>
+
             <button
-              onClick={() => setActiveTab("cards")}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition-all ${
-                activeTab === "cards" ? "bg-slate-800 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
+              onClick={() => setActiveTab("pins")}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+                activeTab === "pins"
+                  ? "bg-slate-800 text-white shadow-sm border border-slate-700"
+                  : "bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800"
               }`}
             >
-              <Binary className="w-3.5 h-3.5" />
-              <span>Cards Only</span>
-            </button>
-            <button
-              onClick={() => setActiveTab("header")}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition-all ${
-                activeTab === "header" ? "bg-slate-800 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              <Binary className="w-3.5 h-3.5" />
-              <span>40-Pin Header</span>
+              <Binary className="w-4 h-4" />
+              <span>40-Pin Header & Raw GPIOs</span>
             </button>
           </div>
         </div>
 
-        {/* Main Content Layout */}
-        {activeTab === "split" && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-            {/* Controllable Cards Grid */}
-            <div className="lg:col-span-7 space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
-                {filteredPins.map((pin) => (
-                  <PinCard
-                    key={pin.id}
-                    pin={pin}
-                    onToggle={handleToggle}
-                    onPulse={handlePulse}
-                    onRename={handleRename}
-                    disabled={isProcessing}
-                  />
-                ))}
-              </div>
-              {filteredPins.length === 0 && (
-                <div className="glass-panel p-8 rounded-2xl text-center text-slate-400">
-                  No pins match your current filter or search criteria.
+        {/* TAB 1: ALL-IN-ONE SMART AUTOMATION HUB */}
+        {activeTab === "hub" && (
+          <div className="space-y-6">
+            {/* Actuators: Relay & DC Motor */}
+            <ActuatorsPanel
+              relayPin={relayPin}
+              motorPin={motorPin}
+              onTogglePin={handleToggle}
+              onTriggerMotorAction={handleTriggerMotorAction}
+              disabled={isProcessing}
+            />
+
+            {/* Sensors: PIR Radar, Light Meter, Push Button */}
+            <SensorsPanel
+              sensors={sensors}
+              onSimulateSensor={handleSimulateSensor}
+              driverMode={stats?.driverMode || "simulation"}
+            />
+
+            {/* Automation Rules Engine & Security Mode */}
+            <AutomationRulesCard
+              rules={rules}
+              securityMode={securityMode}
+              alarmTriggered={securityAlarm}
+              onToggleRule={handleToggleRule}
+              onSetSecurityMode={handleSetSecurityMode}
+              onClearAlarm={handleClearAlarm}
+              disabled={isProcessing}
+            />
+
+            {/* Real-time Activity Log */}
+            <ActivityLog logs={logs} onClearLogs={handleClearLogs} />
+          </div>
+        )}
+
+        {/* TAB 2: RAW 40-PIN HEADER & CARDS */}
+        {activeTab === "pins" && (
+          <div className="space-y-6">
+            <QuickActions
+              onSetAll={handleSetAll}
+              onRunSequence={handleChaserSequence}
+              isProcessing={isProcessing}
+              filter={filter}
+              setFilter={setFilter}
+              searchQuery={searchQuery}
+              setSearchQuery={setSearchQuery}
+            />
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+              {/* Controllable Cards */}
+              <div className="lg:col-span-7 space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
+                  {filteredPins.map((pin) => (
+                    <PinCard
+                      key={pin.id}
+                      pin={pin}
+                      onToggle={handleToggle}
+                      onPulse={handlePulse}
+                      onRename={handleRename}
+                      disabled={isProcessing}
+                    />
+                  ))}
                 </div>
-              )}
+              </div>
+
+              {/* 40-Pin Diagram */}
+              <div className="lg:col-span-5 lg:sticky lg:top-20">
+                <PinHeaderDiagram pins={pins} onToggle={handleToggle} disabled={isProcessing} />
+              </div>
             </div>
-
-            {/* 40-Pin Header Diagram Sticky */}
-            <div className="lg:col-span-5 lg:sticky lg:top-20">
-              <PinHeaderDiagram pins={pins} onToggle={handleToggle} disabled={isProcessing} />
-            </div>
-          </div>
-        )}
-
-        {activeTab === "cards" && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {filteredPins.map((pin) => (
-              <PinCard
-                key={pin.id}
-                pin={pin}
-                onToggle={handleToggle}
-                onPulse={handlePulse}
-                onRename={handleRename}
-                disabled={isProcessing}
-              />
-            ))}
-          </div>
-        )}
-
-        {activeTab === "header" && (
-          <div className="max-w-2xl mx-auto">
-            <PinHeaderDiagram pins={pins} onToggle={handleToggle} disabled={isProcessing} />
           </div>
         )}
       </main>
+
+      {/* Hardware Wiring Modal */}
+      <WiringGuideModal
+        isOpen={isWiringModalOpen}
+        onClose={() => setIsWiringModalOpen(false)}
+      />
 
       {/* Floating Notification Toast */}
       {toast && (

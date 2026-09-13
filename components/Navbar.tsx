@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { Cpu, RefreshCw, Wifi, Clock, ShieldCheck, Activity } from "lucide-react";
+import { Cpu, RefreshCw, Clock, Activity, BookOpen } from "lucide-react";
 import { SystemStats } from "@/lib/types";
 
 interface NavbarProps {
@@ -10,6 +10,7 @@ interface NavbarProps {
   isLoading: boolean;
   autoRefresh: boolean;
   setAutoRefresh: (val: boolean) => void;
+  onOpenWiringGuide: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -18,6 +19,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   isLoading,
   autoRefresh,
   setAutoRefresh,
+  onOpenWiringGuide,
 }) => {
   const [time, setTime] = useState<string>("");
 
@@ -45,7 +47,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="font-bold text-lg text-slate-100 tracking-tight">PiGPIO Hub</h1>
+              <h1 className="font-bold text-lg text-slate-100 tracking-tight">Pi Automation Hub</h1>
               <span
                 className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${
                   stats?.driverMode === "rpi-hardware"
@@ -57,13 +59,23 @@ export const Navbar: React.FC<NavbarProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-400 hidden sm:block">
-              Raspberry Pi Web Controller • Local Network
+              Smart Home Security & Sensor Automation Controller
             </p>
           </div>
         </div>
 
         {/* Right Controls */}
-        <div className="flex items-center gap-2 sm:gap-4">
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Wiring Guide Button */}
+          <button
+            onClick={onOpenWiringGuide}
+            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-200 hover:text-white hover:border-slate-700 active:scale-95 transition-all shadow-sm"
+            title="Open Hardware Wiring Guide"
+          >
+            <BookOpen className="w-3.5 h-3.5 text-rose-400" />
+            <span className="hidden sm:inline">Wiring Guide</span>
+          </button>
+
           {/* Clock */}
           <div className="hidden md:flex items-center gap-1.5 text-xs text-slate-400 bg-slate-900/60 px-3 py-1.5 rounded-lg border border-slate-800">
             <Clock className="w-3.5 h-3.5 text-slate-500" />

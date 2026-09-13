@@ -2,12 +2,11 @@ import fs from "fs";
 import os from "os";
 import { exec } from "child_process";
 import { promisify } from "util";
-import { GpioPin, SystemStats } from "./types";
+import { GpioPin, PinMode, PinState, SystemStats } from "./types";
 import { RPI_40_PINS } from "./pin-definitions";
 
 const execAsync = promisify(exec);
 
-// In-memory persistent state (retains across route requests in the Node server process)
 class GpioManager {
   private pins: Map<number, GpioPin> = new Map();
   private isRaspberryPi: boolean = false;
@@ -40,9 +39,29 @@ class GpioManager {
   }
 
   private initPins() {
-    // Clone pin definitions
     for (const pin of RPI_40_PINS) {
       this.pins.set(pin.id, { ...pin });
+    }
+    // Initialize hardware input pins if on Pi
+    if (this.isRaspberryPi) {
+      this.setupHardwarePin(17, "OUT"); // Pin 11: Relay
+      this.setupHardwarePin(27, "OUT"); // Pin 13: Motor
+      this.setupHardwarePin(22, "IN");  // Pin 15: Light
+      this.setupHardwarePin(23, "IN", "pu"); // Pin 16: Button (Pull-up)
+      this.setupHardwarePin(24, "IN", "pd"); // Pin 18: PIR (Pull-down)
+    }
+  }
+
+  private async setupHardwarePin(bcm: number, mode: PinMode, pull?: "pu" | "pd"): Promise<void> {
+    try {
+      if (mode === "OUT") {
+        await execAsync(`pinctrl set ${bcm} op`);
+      } else {
+        const pullFlag = pull ? ` ${pull}` : "";
+        await execAsync(`pinctrl set ${bcm} ip${pullFlag}`);
+      }
+    } catch {
+      // Fallback or ignore if pinctrl is not available yet
     }
   }
 
@@ -64,7 +83,9 @@ class GpioManager {
   public async setPinState(id: number, state: 0 | 1): Promise<GpioPin> {
     const pin = this.pins.get(id);
     if (!pin) throw new Error(`Pin ${id} not found`);
-    if (!pin.isControllable) throw new Error(`Pin ${id} (${pin.name}) is a reserved ${pin.type} pin and cannot be controlled`);
+    if (!pin.isControllable) {
+      throw new Error(`Pin ${id} (${pin.name}) cannot be written to as an output`);
+    }
 
     pin.state = state;
 
@@ -81,6 +102,44 @@ class GpioManager {
     if (!pin) throw new Error(`Pin ${id} not found`);
     const newState: 0 | 1 = pin.state === 1 ? 0 : 1;
     return this.setPinState(id, newState);
+  }
+
+  public async readPinState(id: number): Promise<PinState> {
+    const pin = this.pins.get(id);
+    if (!pin) throw new Error(`Pin ${id} not found`);
+
+    if (this.isRaspberryPi && pin.bcm >= 0) {
+      try {
+        // Try pinctrl
+        const { stdout } = await execAsync(`pinctrl get ${pin.bcm}`);
+        // pinctrl output format: 24: ip    pd | hi // or // lo
+        const isHigh = stdout.includes("hi") || stdout.includes("level=1") || stdout.includes("=1");
+        pin.state = isHigh ? 1 : 0;
+        this.pins.set(id, pin);
+        return pin.state;
+      } catch {
+        // Fallback gpioget
+        try {
+          const chip = fs.existsSync("/dev/gpiochip4") ? "gpiochip4" : "gpiochip0";
+          const { stdout } = await execAsync(`gpioget ${chip} ${pin.bcm}`);
+          pin.state = stdout.trim() === "1" ? 1 : 0;
+          this.pins.set(id, pin);
+          return pin.state;
+        } catch {
+          // Keep current state
+        }
+      }
+    }
+
+    return pin.state;
+  }
+
+  public setSimulationInputState(id: number, state: 0 | 1): GpioPin {
+    const pin = this.pins.get(id);
+    if (!pin) throw new Error(`Pin ${id} not found`);
+    pin.state = state;
+    this.pins.set(id, pin);
+    return pin;
   }
 
   public async pulsePin(id: number, durationMs: number = 500, times: number = 1): Promise<void> {
@@ -128,35 +187,29 @@ class GpioManager {
   }
 
   private async writeHardwarePin(bcm: number, state: 0 | 1): Promise<void> {
-    const levelStr = state === 1 ? "dh" : "dl"; // dh = drive high, dl = drive low
-    
-    // Attempt 1: Modern Raspberry Pi OS (Bookworm / Pi 5 / Pi 4) uses 'pinctrl'
+    const levelStr = state === 1 ? "dh" : "dl";
     try {
       await execAsync(`pinctrl set ${bcm} op ${levelStr}`);
       return;
     } catch {
-      // pinctrl not available, try other methods
+      // pinctrl not available, try gpioset
     }
 
-    // Attempt 2: gpioset from libgpiod (detect chip0 or chip4)
     try {
-      // Pi 5 typically uses gpiochip4; Pi 4 / 3 uses gpiochip0
       const chip = fs.existsSync("/dev/gpiochip4") ? "gpiochip4" : "gpiochip0";
       await execAsync(`gpioset ${chip} ${bcm}=${state}`);
       return;
     } catch {
-      // continue to fallback
+      // raspi-gpio legacy
     }
 
-    // Attempt 3: raspi-gpio legacy
     try {
       await execAsync(`raspi-gpio set ${bcm} op ${levelStr}`);
       return;
     } catch {
-      // continue
+      // sysfs
     }
 
-    // Attempt 4: sysfs /sys/class/gpio fallback
     try {
       const gpioPath = `/sys/class/gpio/gpio${bcm}`;
       if (!fs.existsSync(gpioPath)) {
@@ -202,7 +255,6 @@ class GpioManager {
   }
 }
 
-// Global singleton instance so state is preserved across requests
 const globalForGpio = globalThis as unknown as { gpioManager?: GpioManager };
 export const gpio = globalForGpio.gpioManager || new GpioManager();
 if (process.env.NODE_ENV !== "production") globalForGpio.gpioManager = gpio;
